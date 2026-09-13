@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Virusgram Bot. Made by Gubo Studios"""
+"""Virusgram Bot — aiogram 3.x + SQLite. Made by Gubo Studios"""
 import os, time, random, logging, sqlite3
 from dotenv import load_dotenv
 from aiohttp import web
@@ -8,7 +8,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.filters.chat_member_updated import ChatMemberUpdatedFilter, JOIN_TRANSITION
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from aiogram.enums import ChatType, ChatMemberStatus
+from aiogram.enums import ChatType
 from aiogram.types import (
     Message, CallbackQuery, PreCheckoutQuery, ChatMemberUpdated,
     InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice,
@@ -18,6 +18,7 @@ from aiogram.types import (
 from aiogram.utils.deep_linking import create_startgroup_link
 from PIL import Image, ImageDraw, ImageFont
 
+# ==================== SOZLAMALAR ====================
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID  = int(os.getenv("ADMIN_ID", "0"))
@@ -32,29 +33,44 @@ if not ADMIN_ID: raise SystemExit("ADMIN_ID topilmadi")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 router = Router()
 
+# ==================== ADMIN TEKSHIRUVI (MIDDLEWARE) ====================
 _admin_cache = {}
 
 class AdminRequiredMiddleware(BaseMiddleware):
+    """Guruhda bot admin bo'lmasa — buyruqlar ishlamaydi."""
     async def __call__(self, handler, event: TelegramObject, data: dict):
         try:
+            # Faqat Message va CallbackQuery
             if not isinstance(event, (Message, CallbackQuery)):
                 return await handler(event, data)
+
             message = event if isinstance(event, Message) else event.message
-            if not message: return await handler(event, data)
+            if not message:
+                return await handler(event, data)
+
+            # Shaxsiy chatda tekshiruv yo'q
             if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
                 return await handler(event, data)
+
             bot = data.get("bot")
-            if not bot: return await handler(event, data)
+            if not bot:
+                return await handler(event, data)
+
             cid = message.chat.id
             now = time.time()
+
+            # 30 sekund kesh
             cached = _admin_cache.get(cid)
-            if cached and (now - cached[1]) < 60:
+            if cached and (now - cached[1]) < 30:
                 is_adm = cached[0]
             else:
                 me = await bot.get_me()
-                m = await bot.get_chat_member(cid, me.id)
-                is_adm = m.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+                member = await bot.get_chat_member(chat_id=cid, user_id=me.id)
+                status = str(member.status).lower()
+                is_adm = status in ("administrator", "creator")
                 _admin_cache[cid] = (is_adm, now)
+                logging.info(f"[ADMIN CHECK] chat={cid} status={status} admin={is_adm}")
+
             if not is_adm:
                 text = ("⚠️ <b>Bot admin emas!</b>\n\n"
                         "Barcha buyruqlar ishlashi uchun meni guruhga admin qiling:\n\n"
@@ -66,14 +82,18 @@ class AdminRequiredMiddleware(BaseMiddleware):
                 try:
                     if isinstance(event, CallbackQuery):
                         await event.answer("Bot admin emas!", show_alert=True)
-                    await message.reply(text, parse_mode="HTML")
-                except: pass
+                    else:
+                        await message.reply(text, parse_mode="HTML")
+                except Exception:
+                    pass
                 return
+
             return await handler(event, data)
         except Exception as e:
-            logging.exception(e)
+            logging.exception(f"Middleware xatosi: {e}")
             return await handler(event, data)
 
+# ==================== SQLITE ====================
 def db_conn(): return sqlite3.connect(DB_PATH)
 
 def db_init():
@@ -141,19 +161,24 @@ def db_all_ids():
     with db_conn() as c:
         return [r[0] for r in c.execute("SELECT DISTINCT user_id FROM users").fetchall()]
 
+# ==================== O'YIN MANTIQI ====================
 def roll_virus(cur):
+    """5+ virusda 15% ehtimolda -1..-10, aks holda +1..+20."""
     if cur >= 5 and random.random() < 0.15:
         return random.randint(-10, -1)
     return random.randint(1, 20)
 
+# ==================== SHRIFT ====================
 def _get_font(size):
     for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-              "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+              "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+              "/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"):
         if os.path.exists(p):
             try: return ImageFont.truetype(p, size)
             except: pass
     return ImageFont.load_default()
 
+# ==================== RASM CHIZISH ====================
 _IMG_CACHE = {}
 
 def _load_img(name, box):
@@ -163,7 +188,8 @@ def _load_img(name, box):
     if not os.path.exists(src):
         _IMG_CACHE[key] = None; return None
     try: base = Image.open(src).convert("RGBA")
-    except: _IMG_CACHE[key] = None; return None
+    except:
+        _IMG_CACHE[key] = None; return None
     tw, th = box
     bw, bh = base.size
     sc = min(tw/bw, th/bh)
@@ -180,7 +206,8 @@ def _load_img(name, box):
             if a < 50: continue
             if r>240 and g>240 and b>240: continue
             pts.append((x,y))
-    if not pts: _IMG_CACHE[key] = None; return None
+    if not pts:
+        _IMG_CACHE[key] = None; return None
     cx = sum(p[0] for p in pts)/len(pts)
     cy = sum(p[1] for p in pts)/len(pts)
     pts.sort(key=lambda p: (p[0]-cx)**2 + (p[1]-cy)**2)
@@ -246,6 +273,7 @@ def create_virus_image(name, v, uid, cid):
     except: out = f"virus_{cid}_{uid}.png"; img.save(out)
     return out
 
+# ==================== HANDLERLAR ====================
 @router.message(CommandStart())
 async def cmd_start(message: Message, bot: Bot):
     name = message.from_user.first_name if message.from_user else "Do'stim"
@@ -440,6 +468,7 @@ async def on_join(event: ChatMemberUpdated, bot: Bot):
             await bot.send_message(event.chat.id, t, parse_mode="HTML")
     except Exception as e: logging.exception(e)
 
+# ==================== ADMIN PANEL ====================
 class AdminState(StatesGroup):
     add_uid = State(); add_amt = State()
     rem_uid = State(); rem_amt = State()
@@ -588,6 +617,7 @@ async def adm_bcast(message: Message, state: FSMContext):
     await message.answer(f"📢 Yuborildi: {sent}\n❌ Xato: {fail}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Panel", callback_data="adm:back")]]))
 
+# ==================== MENYU ====================
 async def setup_commands(bot: Bot):
     priv = [
         BotCommand(command="start",   description="🚀 Boshlash"),
@@ -612,6 +642,7 @@ async def setup_commands(bot: Bot):
     except Exception as e:
         logging.warning(f"Menyu: {e}")
 
+# ==================== WEBHOOK / POLLING ====================
 bot = None
 dp = None
 
@@ -634,7 +665,7 @@ async def main():
     dp = Dispatcher()
     dp.include_router(router)
 
-    # Admin middleware — faqat guruhlarda
+    # Admin middleware
     router.message.middleware(AdminRequiredMiddleware())
     router.callback_query.middleware(AdminRequiredMiddleware())
     logging.info("Admin tekshiruvi middleware o'rnatildi")
