@@ -3,7 +3,7 @@
 import os, time, random, logging, sqlite3
 from dotenv import load_dotenv
 from aiohttp import web
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
 from aiogram.filters import Command, CommandStart
 from aiogram.filters.chat_member_updated import ChatMemberUpdatedFilter, JOIN_TRANSITION
 from aiogram.fsm.state import State, StatesGroup
@@ -13,7 +13,7 @@ from aiogram.types import (
     Message, CallbackQuery, PreCheckoutQuery, ChatMemberUpdated,
     InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice,
     FSInputFile, BotCommand, BotCommandScopeDefault,
-    BotCommandScopeAllGroupChats, Update
+    BotCommandScopeAllGroupChats, Update, TelegramObject
 )
 from aiogram.utils.deep_linking import create_startgroup_link
 from PIL import Image, ImageDraw, ImageFont
@@ -31,6 +31,48 @@ if not ADMIN_ID: raise SystemExit("ADMIN_ID topilmadi")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 router = Router()
+
+_admin_cache = {}
+
+class AdminRequiredMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        try:
+            if not isinstance(event, (Message, CallbackQuery)):
+                return await handler(event, data)
+            message = event if isinstance(event, Message) else event.message
+            if not message: return await handler(event, data)
+            if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+                return await handler(event, data)
+            bot = data.get("bot")
+            if not bot: return await handler(event, data)
+            cid = message.chat.id
+            now = time.time()
+            cached = _admin_cache.get(cid)
+            if cached and (now - cached[1]) < 60:
+                is_adm = cached[0]
+            else:
+                me = await bot.get_me()
+                m = await bot.get_chat_member(cid, me.id)
+                is_adm = m.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+                _admin_cache[cid] = (is_adm, now)
+            if not is_adm:
+                text = ("⚠️ <b>Bot admin emas!</b>\n\n"
+                        "Barcha buyruqlar ishlashi uchun meni guruhga admin qiling:\n\n"
+                        "1️⃣ Guruh nomini bosing → <b>Manage Group</b>\n"
+                        "2️⃣ <b>Administrators</b> → <b>Add Admin</b>\n"
+                        "3️⃣ <b>Virusgram</b> botni tanlang\n"
+                        "4️⃣ <b>Save</b> bosing\n\n"
+                        "Shundan keyin barcha buyruqlar ishlaydi ✅")
+                try:
+                    if isinstance(event, CallbackQuery):
+                        await event.answer("Bot admin emas!", show_alert=True)
+                    await message.reply(text, parse_mode="HTML")
+                except: pass
+                return
+            return await handler(event, data)
+        except Exception as e:
+            logging.exception(e)
+            return await handler(event, data)
 
 def db_conn(): return sqlite3.connect(DB_PATH)
 
@@ -106,8 +148,7 @@ def roll_virus(cur):
 
 def _get_font(size):
     for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-              "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-              "/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"):
+              "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
         if os.path.exists(p):
             try: return ImageFont.truetype(p, size)
             except: pass
@@ -120,12 +161,9 @@ def _load_img(name, box):
     if key in _IMG_CACHE: return _IMG_CACHE[key]
     src = os.path.join(BASE_DIR, name)
     if not os.path.exists(src):
-        _IMG_CACHE[key] = None
-        return None
+        _IMG_CACHE[key] = None; return None
     try: base = Image.open(src).convert("RGBA")
-    except:
-        _IMG_CACHE[key] = None
-        return None
+    except: _IMG_CACHE[key] = None; return None
     tw, th = box
     bw, bh = base.size
     sc = min(tw/bw, th/bh)
@@ -142,9 +180,7 @@ def _load_img(name, box):
             if a < 50: continue
             if r>240 and g>240 and b>240: continue
             pts.append((x,y))
-    if not pts:
-        _IMG_CACHE[key] = None
-        return None
+    if not pts: _IMG_CACHE[key] = None; return None
     cx = sum(p[0] for p in pts)/len(pts)
     cy = sum(p[1] for p in pts)/len(pts)
     pts.sort(key=lambda p: (p[0]-cx)**2 + (p[1]-cy)**2)
@@ -168,8 +204,7 @@ def _draw_fill(img, d, name, box, pct, fill, outline, W, H):
     total = len(pts)
     n = int(total*pct/100)
     for i in range(n):
-        x,y = pts[i]
-        px[x,y] = fill
+        x,y = pts[i]; px[x,y] = fill
     rnd = random.Random(42+int(pct*10))
     start, end = max(0,n-100), min(total,n+30)
     dd = ImageDraw.Draw(work)
@@ -210,22 +245,6 @@ def create_virus_image(name, v, uid, cid):
     try: img.save(out)
     except: out = f"virus_{cid}_{uid}.png"; img.save(out)
     return out
-
-async def is_bot_admin(cid, bot):
-    try:
-        me = await bot.get_me()
-        m = await bot.get_chat_member(cid, me.id)
-        return m.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
-    except: return False
-
-async def send_admin_warning(message):
-    text = ("⚠️ <b>Bot admin emas!</b>\n\nBu buyruq ishlashi uchun meni guruhga admin qiling:\n\n"
-            "1️⃣ Guruh nomini bosing → <b>Manage Group</b>\n"
-            "2️⃣ <b>Administrators</b> → <b>Add Admin</b>\n"
-            "3️⃣ <b>Virusgram</b> botni tanlang\n"
-            "4️⃣ <b>Save</b> bosing\n\nShundan keyin barcha buyruqlar ishlaydi ✅")
-    try: await message.reply(text, parse_mode="HTML")
-    except: pass
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, bot: Bot):
@@ -328,9 +347,6 @@ async def cmd_pic(message: Message, bot: Bot):
         if not message.from_user: return
         uid, cid = message.from_user.id, message.chat.id
         name = message.from_user.first_name or "Do'stim"
-        if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-            if not await is_bot_admin(cid, bot):
-                await send_admin_warning(message); return
         db_ensure_user(uid, cid, name)
         u = db_get_user(uid, cid)
         path = create_virus_image(name, u["viruses"], uid, cid)
@@ -407,8 +423,7 @@ async def on_join(event: ChatMemberUpdated, bot: Bot):
         me = await bot.get_me()
         if user.id == me.id:
             t = ("🦠 <b>Virusgram Bot guruhga qo'shildi!</b>\n\n"
-                 "⚙️ <b>Botni admin qiling</b> — aks holda ba'zi funksiyalar ishlamaydi:\n"
-                 "• 🖼 /pic — rasm\n• 🚫 Ban/Unban\n\n"
+                 "⚙️ <b>Botni admin qiling</b> — aks holda barcha buyruqlar ishlamaydi:\n\n"
                  "📋 <b>Qanday admin qilish:</b>\n"
                  "1️⃣ Guruh nomini bosing → <b>Manage Group</b>\n"
                  "2️⃣ <b>Administrators</b> → <b>Add Admin</b>\n"
@@ -561,8 +576,7 @@ async def adm_unban_uid(message: Message, state: FSMContext):
 async def adm_bcast(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
     text = (message.text or "").strip()
-    if not text:
-        await message.answer("❌ Bo'sh"); return
+    if not text: await message.answer("❌ Bo'sh"); return
     await state.clear()
     ids = db_all_ids()
     sent, fail = 0, 0
@@ -594,7 +608,7 @@ async def setup_commands(bot: Bot):
     try:
         await bot.set_my_commands(priv, scope=BotCommandScopeDefault())
         await bot.set_my_commands(grp, scope=BotCommandScopeAllGroupChats())
-        logging.info("✅ Buyruqlar menyusi o'rnatildi")
+        logging.info("Buyruqlar menyusi o'rnatildi")
     except Exception as e:
         logging.warning(f"Menyu: {e}")
 
@@ -619,7 +633,13 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
-    logging.info("Virusgram Bot ishga tushdi ✅")
+
+    # Admin middleware — faqat guruhlarda
+    router.message.middleware(AdminRequiredMiddleware())
+    router.callback_query.middleware(AdminRequiredMiddleware())
+    logging.info("Admin tekshiruvi middleware o'rnatildi")
+
+    logging.info("Virusgram Bot ishga tushdi")
 
     PORT = int(os.getenv("PORT", 10000))
     WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/")
@@ -630,18 +650,18 @@ async def main():
         await setup_commands(bot)
         full_url = f"{WEBHOOK_URL}/webhook"
         await bot.set_webhook(url=full_url, drop_pending_updates=True)
-        logging.info(f"✅ Webhook: {full_url}")
+        logging.info(f"Webhook: {full_url}")
         app = web.Application()
         app.router.add_post("/webhook", handle_webhook)
         app.router.add_get("/", handle_health)
         app.router.add_get("/health", handle_health)
-        logging.info(f"🚀 Server 0.0.0.0:{PORT}")
+        logging.info(f"Server 0.0.0.0:{PORT}")
         await web._run_app(app, host="0.0.0.0", port=PORT)
     else:
         try: await bot.delete_webhook(drop_pending_updates=True)
         except Exception as e: logging.warning(f"Webhook: {e}")
         await setup_commands(bot)
-        logging.info("🔄 Polling rejimi")
+        logging.info("Polling rejimi")
         await dp.start_polling(bot)
 
 if __name__ == "__main__":
