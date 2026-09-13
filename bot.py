@@ -23,9 +23,10 @@ from aiogram.types import (
     Message, CallbackQuery, PreCheckoutQuery, ChatMemberUpdated,
     InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice,
     FSInputFile, BotCommand, BotCommandScopeDefault,
-    BotCommandScopeAllGroupChats
+    BotCommandScopeAllGroupChats, Update
 )
 from aiogram.utils.deep_linking import create_startgroup_link
+from aiohttp import web
 from PIL import Image, ImageDraw, ImageFont
 
 # ==========================================================
@@ -856,7 +857,26 @@ async def setup_commands(bot: Bot):
     except Exception as e:
         logging.warning(f"Menyu o'rnatishda xatolik: {e}")
 
+# Global references (webhook uchun kerak)
+bot = None
+dp = None
+
+async def handle_webhook(request):
+    """Telegram'dan kelgan so'rovni qabul qilish."""
+    try:
+        data = await request.json()
+        update = Update.model_validate(data, context={"bot": bot})
+        await dp.feed_update(bot, update)
+    except Exception as e:
+        logging.exception(e)
+    return web.Response(text="OK")
+
+async def handle_health(request):
+    """Render health check uchun."""
+    return web.Response(text="OK")
+
 async def main():
+    global bot, dp
     db_init()
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
@@ -864,13 +884,38 @@ async def main():
 
     logging.info("Virusgram Bot ishga tushdi ✅")
 
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-    except Exception as e:
-        logging.warning(f"Webhook: {e}")
+    PORT = int(os.getenv("PORT", 10000))
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/")
 
-    await setup_commands(bot)
-    await dp.start_polling(bot)
+    if WEBHOOK_URL:
+        # ===== WEBHOOK REJIMI (Render uchun) =====
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:
+            logging.warning(f"Webhook o'chirishda xatolik: {e}")
+
+        await setup_commands(bot)
+
+        full_url = f"{WEBHOOK_URL}/webhook"
+        await bot.set_webhook(url=full_url, drop_pending_updates=True)
+        logging.info(f"✅ Webhook o'rnatildi: {full_url}")
+
+        app = web.Application()
+        app.router.add_post("/webhook", handle_webhook)
+        app.router.add_get("/", handle_health)
+        app.router.add_get("/health", handle_health)
+
+        logging.info(f"🚀 Server 0.0.0.0:{PORT} da ishga tushdi")
+        await web._run_app(app, host="0.0.0.0", port=PORT)
+    else:
+        # ===== POLLING REJIMI (mahalliy test) =====
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:
+            logging.warning(f"Webhook: {e}")
+        await setup_commands(bot)
+        logging.info("🔄 Polling rejimida ishga tushdi")
+        await dp.start_polling(bot)
 
 if __name__ == "__main__":
     import asyncio
